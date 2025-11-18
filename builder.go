@@ -4,7 +4,7 @@
 package biscuit
 
 import (
-	"crypto/ed25519"
+	// "crypto/ed25519"
 	"errors"
 	"io"
 
@@ -13,6 +13,7 @@ import (
 
 	//"github.com/eclipse-biscuit/biscuit-go/sig"
 	"google.golang.org/protobuf/proto"
+	Kyber "go.dedis.ch/kyber/v3"
 )
 
 var (
@@ -31,7 +32,7 @@ type Builder interface {
 
 type builderOptions struct {
 	rng       io.Reader
-	rootKey   ed25519.PrivateKey
+	rootKey   Kyber.Scalar
 	rootKeyID *uint32
 
 	symbolsStart int
@@ -60,7 +61,7 @@ func WithSymbols(symbols *datalog.SymbolTable) builderOption {
 	return symbolsOption{symbols}
 }
 
-func NewBuilder(root ed25519.PrivateKey, opts ...builderOption) Builder {
+func NewBuilder(root Kyber.Scalar, opts ...builderOption) Builder {
 	b := &builderOptions{
 		rootKey:      root,
 		symbols:      defaultSymbolTable.Clone(),
@@ -122,26 +123,26 @@ func (b *builderOptions) SetContext(context string) {
 }
 
 func (b *builderOptions) Build() (*Biscuit, error) {
-	opts := make([]biscuitOption, 0, 2)
-	if v := b.rng; v != nil {
-		opts = append(opts, WithRNG(b.rng))
-	}
-	if v := b.rootKeyID; v != nil {
-		opts = append(opts, WithRootKeyID(*v))
-	}
-	return newBiscuit(
-		b.rootKey,
-		b.symbols,
-		&Block{
-			symbols: b.symbols.SplitOff(b.symbolsStart),
-			facts:   b.facts,
-			rules:   b.rules,
-			checks:  b.checks,
-			context: b.context,
-			version: MaxSchemaVersion,
-		},
-		opts...)
+    opts := make([]biscuitOption, 0, 2)
+    if v := b.rng; v != nil {
+        opts = append(opts, WithRNG(b.rng))
+    }
+    if v := b.rootKeyID; v != nil {
+        opts = append(opts, WithRootKeyID(*v))
+    }
+
+    block := &Block{
+        symbols: b.symbols.SplitOff(b.symbolsStart),
+        facts:   b.facts,
+        rules:   b.rules,
+        checks:  b.checks,
+        context: b.context,
+        version: MaxSchemaVersion,
+    }
+
+    return newBiscuit(b.rootKey, b.symbols, block, opts...)
 }
+
 
 type Unmarshaler struct {
 	Symbols *datalog.SymbolTable
@@ -163,12 +164,12 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 		return nil, err
 	}
 
-	if len(container.Authority.NextKey.Key) != 32 {
-		return nil, ErrInvalidKeySize
-	}
-	if len(container.Authority.Signature) != 64 {
-		return nil, ErrInvalidSignatureSize
-	}
+	// if len(container.Authority.NextKey.Key) != 32 {
+	// 	return nil, ErrInvalidKeySize
+	// }
+	// if len(container.Authority.Signature) != 64 {
+	// 	return nil, ErrInvalidSignatureSize
+	// }
 
 	pbAuthority := new(pb.Block)
 	if err := proto.Unmarshal(container.Authority.Block, pbAuthority); err != nil {
@@ -184,12 +185,12 @@ func (u *Unmarshaler) Unmarshal(serialized []byte) (*Biscuit, error) {
 
 	blocks := make([]*Block, len(container.Blocks))
 	for i, sb := range container.Blocks {
-		if len(sb.NextKey.Key) != 32 {
-			return nil, ErrInvalidKeySize
-		}
-		if len(sb.Signature) != 64 {
-			return nil, ErrInvalidSignatureSize
-		}
+		// if len(sb.NextKey.Key) != 32 {
+		// 	return nil, ErrInvalidKeySize
+		// }
+		// if len(sb.Signature) != 64 {
+		// 	return nil, ErrInvalidSignatureSize
+		// }
 
 		pbBlock := new(pb.Block)
 		if err := proto.Unmarshal(sb.Block, pbBlock); err != nil {

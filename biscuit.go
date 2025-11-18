@@ -4,21 +4,23 @@
 package biscuit
 
 import (
-	"bytes"
 	"crypto/rand"
-	"encoding/binary"
 
-	//"crypto/sha256"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"io"
+	"crypto/sha256"
+    "encoding/hex"
+
 
 	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
 	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 
-	//"github.com/eclipse-biscuit/biscuit-go/sig"
 	"google.golang.org/protobuf/proto"
+	 "github.com/hpe-usp-spire/schoco"
+
+	Kyber "go.dedis.ch/kyber/v3"
+	"go.dedis.ch/kyber/v3/group/edwards25519"
 )
 
 // Biscuit represents a valid Biscuit token
@@ -29,9 +31,15 @@ type Biscuit struct {
 	blocks    []*Block
 	symbols   *datalog.SymbolTable
 	container *pb.Biscuit
+	rootPubKey []byte
+	sealed	bool
 }
 
 var (
+	curve = edwards25519.NewBlakeSHA256Ed25519()
+	g = curve.Point().Base()
+
+
 	// ErrSymbolTableOverlap is returned when multiple blocks declare the same symbols
 	ErrSymbolTableOverlap = errors.New("biscuit: symbol table overlap")
 	// ErrInvalidAuthorityIndex occurs when an authority block index is not 0
@@ -68,73 +76,80 @@ type biscuitOption interface {
 	applyToBiscuit(*biscuitOptions) error
 }
 
-func newBiscuit(root ed25519.PrivateKey, baseSymbols *datalog.SymbolTable, authority *Block, opts ...biscuitOption) (*Biscuit, error) {
-	options := biscuitOptions{
-		rng: rand.Reader,
-	}
-	for _, opt := range opts {
-		if err := opt.applyToBiscuit(&options); err != nil {
-			return nil, err
-		}
-	}
+func newBiscuit(root Kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block, opts ...biscuitOption) (*Biscuit, error) {
+    rootPubKey := curve.Point().Mul(root, g)
+    schocoRootPubKey, err := schoco.PointToByte(rootPubKey)
+    if err != nil {
+        return nil, err
+    }
 
-	symbols := baseSymbols.Clone()
+    options := biscuitOptions{
+        rng: rand.Reader,
+    }
+    for _, opt := range opts {
+        if err := opt.applyToBiscuit(&options); err != nil {
+            return nil, err
+        }
+    }
 
-	if !symbols.IsDisjoint(authority.symbols) {
-		return nil, ErrSymbolTableOverlap
-	}
+    symbols := baseSymbols.Clone()
+    if !symbols.IsDisjoint(authority.symbols) {
+        return nil, ErrSymbolTableOverlap
+    }
+    symbols.Extend(authority.symbols)
 
-	symbols.Extend(authority.symbols)
+    protoAuthority, err := tokenBlockToProtoBlock(authority)
+    if err != nil {
+        return nil, err
+    }
+    marshalledAuthority, err := proto.Marshal(protoAuthority)
+    if err != nil {
+        return nil, err
+    }
 
-	nextPublicKey, nextPrivateKey, _ := ed25519.GenerateKey(options.rng)
+    // assinatura Schoco
+    msg := string(marshalledAuthority)
+    signature := schoco.StdSign(fmt.Sprintf("%s", msg), root)
+    sigBytes, err := signature.ToByte()
+    if err != nil {
+        return nil, err
+    }
 
-	protoAuthority, err := tokenBlockToProtoBlock(authority)
-	if err != nil {
-		return nil, err
-	}
-	marshalledAuthority, err := proto.Marshal(protoAuthority)
-	if err != nil {
-		return nil, err
-	}
+    algorithm := pb.PublicKey_Ed25519
 
-	algorithm := pb.PublicKey_Ed25519
-	toSignAlgorithm := make([]byte, 4)
-	binary.LittleEndian.PutUint32(toSignAlgorithm[0:], uint32(pb.PublicKey_Ed25519))
-	toSign := append(marshalledAuthority[:], toSignAlgorithm...)
-	toSign = append(toSign, nextPublicKey[:]...)
+    // dummy nextKey para satisfazer protobuf
+    nextKey := &pb.PublicKey{
+        Algorithm: &algorithm,
+        Key:       make([]byte, 32), // dummy 32 bytes
+    }
 
-	signature := ed25519.Sign(root, toSign)
-	nextKey := &pb.PublicKey{
-		Algorithm: &algorithm,
-		Key:       nextPublicKey,
-	}
-
-	signedBlock := &pb.SignedBlock{
-		Block:     marshalledAuthority,
-		NextKey:   nextKey,
-		Signature: signature,
-	}
+    signedBlock := &pb.SignedBlock{
+        Block:     marshalledAuthority,
+        NextKey:   nextKey,
+        Signature: sigBytes,
+    }
 
 	proof := &pb.Proof{
 		Content: &pb.Proof_NextSecret{
-			NextSecret: nextPrivateKey.Seed(),
+			NextSecret: sigBytes,
 		},
 	}
 
-	container := &pb.Biscuit{
-		RootKeyId: options.rootKeyID,
-		Authority: signedBlock,
-		Proof:     proof,
-	}
+    container := &pb.Biscuit{
+        RootKeyId: options.rootKeyID,
+        Authority: signedBlock,
+        Proof:     proof,
+    }
 
-	return &Biscuit{
-		authority: authority,
-		symbols:   symbols,
-		container: container,
-	}, nil
+    return &Biscuit{
+        authority: authority,
+        symbols:   symbols,
+        container: container,
+        rootPubKey: schocoRootPubKey,
+    }, nil
 }
 
-func New(rng io.Reader, root ed25519.PrivateKey, baseSymbols *datalog.SymbolTable, authority *Block) (*Biscuit, error) {
+func New(rng io.Reader, root Kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block) (*Biscuit, error) {
 	var opts []biscuitOption
 	if rng != nil {
 		opts = []biscuitOption{WithRNG(rng)}
@@ -146,27 +161,25 @@ func (b *Biscuit) CreateBlock() BlockBuilder {
 	return NewBlockBuilder(b.symbols.Clone())
 }
 
+// Append corrigido: preserva bytes brutos (marshalledBlock), substitui a assinatura anterior
+// por Point bytes (R) dentro do container, e grava a nova SignedBlock com a assinatura completa.
+// NOTA: não depende de um campo em memória para partialSigs — a validação vai reconstruí-los a partir do container.
 func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
-	if b.container == nil {
-		return nil, errors.New("biscuit: append failed, token is sealed")
+	if b.sealed {
+		return nil, errors.New("biscuit: token is sealed, cannot append")
 	}
 
-	privateKey := b.container.Proof.GetNextSecret()
-	if privateKey == nil {
-		return nil, errors.New("biscuit: append failed, token is sealed")
+	// pega a assinatura atual (authority ou último bloco)
+	prevSignature, err := LastBlockSignature(b)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(privateKey) != 32 {
-		return nil, ErrInvalidKeySize
-	}
-
-	privateKey = ed25519.NewKeyFromSeed(privateKey)
 
 	if !b.symbols.IsDisjoint(block.symbols) {
 		return nil, ErrSymbolTableOverlap
 	}
 
-	// clone biscuit fields and append new block
+	// clone biscuit fields and append new block (token structure in-memory)
 	authority := new(Block)
 	*authority = *b.authority
 
@@ -180,9 +193,7 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 	symbols := b.symbols.Clone()
 	symbols.Extend(block.symbols)
 
-	nextPublicKey, nextPrivateKey, _ := ed25519.GenerateKey(rng)
-
-	// serialize and sign the new block
+	// serialize the new block (these bytes are what we sign & later store)
 	protoBlock, err := tokenBlockToProtoBlock(block)
 	if err != nil {
 		return nil, err
@@ -192,109 +203,96 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 		return nil, err
 	}
 
-	algorithm := pb.PublicKey_Ed25519
-	toSignAlgorithm := make([]byte, 4)
-	binary.LittleEndian.PutUint32(toSignAlgorithm[0:], uint32(pb.PublicKey_Ed25519))
-	toSign := append(marshalledBlock[:], toSignAlgorithm...)
-	toSign = append(toSign, nextPublicKey[:]...)
+	// convert previous signature bytes to schoco Signature
+	prevSig, err := schoco.ByteToSignature(prevSignature)
+	if err != nil {
+		return nil, err
+	}
 
-	signature := ed25519.Sign(privateKey, toSign)
+	// aggregate: this returns a partial signature point (to store replacing previous signature)
+	// and a new full signature for the new block
+	partSig, lastSig := schoco.Aggregate(string(marshalledBlock), prevSig)
+
+	// convert partial point -> bytes and replace the previous signature in the serialized container
+	p2Byte, err := schoco.PointToByte(partSig)
+	if err != nil {
+		return nil, err
+	}
+	if err := ReplaceLastBlockSignature(b, p2Byte); err != nil {
+		return nil, err
+	}
+
+	// full signature for the new block -> bytes
+	sig2Byte, err := lastSig.ToByte()
+	if err != nil {
+		return nil, err
+	}
+
+	algorithm := pb.PublicKey_Ed25519
 	nextKey := &pb.PublicKey{
 		Algorithm: &algorithm,
-		Key:       nextPublicKey,
+		Key:       sig2Byte,
 	}
 
 	signedBlock := &pb.SignedBlock{
 		Block:     marshalledBlock,
 		NextKey:   nextKey,
-		Signature: signature,
+		Signature: sig2Byte,
 	}
 
 	proof := &pb.Proof{
 		Content: &pb.Proof_NextSecret{
-			NextSecret: nextPrivateKey.Seed(),
+			NextSecret: sig2Byte,
 		},
 	}
 
-	// clone container and append new marshalled block and public key
+	// clone container and append new signed block
 	container := &pb.Biscuit{
 		Authority: b.container.Authority,
 		Blocks:    append([]*pb.SignedBlock{}, b.container.Blocks...),
 		Proof:     proof,
 	}
-
 	container.Blocks = append(container.Blocks, signedBlock)
 
 	return &Biscuit{
-		authority: authority,
-		blocks:    blocks,
-		symbols:   symbols,
-		container: container,
+		authority:   authority,
+		blocks:      blocks,
+		symbols:     symbols,
+		container:   container,
 	}, nil
 }
 
-func (b *Biscuit) Seal(rng io.Reader) (*Biscuit, error) {
-	if b.container == nil {
-		return nil, errors.New("biscuit: token is already sealed")
-	}
 
-	privateKey := b.container.Proof.GetNextSecret()
-	if privateKey == nil {
-		return nil, errors.New("biscuit: token is already sealed")
-	}
 
-	if len(privateKey) != 32 {
-		return nil, ErrInvalidKeySize
-	}
+func (b *Biscuit) Seal() *Biscuit {
+    if b.sealed {
+        return b
+    }
 
-	privateKey = ed25519.NewKeyFromSeed(privateKey)
+    // clone fields para não alterar original
+    authority := new(Block)
+    *authority = *b.authority
 
-	// clone biscuit fields and append new block
-	authority := new(Block)
-	*authority = *b.authority
+    blocks := make([]*Block, len(b.blocks))
+    for i, blk := range b.blocks {
+        blocks[i] = new(Block)
+        *blocks[i] = *blk
+    }
 
-	blocks := make([]*Block, len(b.blocks))
-	for i, oldBlock := range b.blocks {
-		blocks[i] = new(Block)
-		*blocks[i] = *oldBlock
-	}
+    container := &pb.Biscuit{
+        Authority: b.container.Authority,
+        Blocks:    append([]*pb.SignedBlock{}, b.container.Blocks...),
+        RootKeyId: b.container.RootKeyId,
+    }
 
-	var lastBlock *pb.SignedBlock
-	if len(b.blocks) == 0 {
-		lastBlock = b.container.Authority
-	} else {
-		lastBlock = b.container.Blocks[len(b.blocks)-1]
-	}
-
-	toSignAlgorithm := make([]byte, 4)
-	binary.LittleEndian.PutUint32(toSignAlgorithm[0:], uint32(lastBlock.NextKey.Algorithm.Number()))
-	toSign := append(lastBlock.Block[:], toSignAlgorithm...)
-	toSign = append(toSign, lastBlock.NextKey.Key[:]...)
-	toSign = append(toSign, lastBlock.Signature[:]...)
-
-	signature := ed25519.Sign(privateKey, toSign)
-
-	proof := &pb.Proof{
-		Content: &pb.Proof_FinalSignature{
-			FinalSignature: signature,
-		},
-	}
-
-	// clone container and append new marshalled block and public key
-	container := &pb.Biscuit{
-		Authority: b.container.Authority,
-		Blocks:    append([]*pb.SignedBlock{}, b.container.Blocks...),
-		Proof:     proof,
-	}
-
-	symbols := b.symbols.Clone()
-
-	return &Biscuit{
-		authority: authority,
-		blocks:    blocks,
-		symbols:   symbols,
-		container: container,
-	}, nil
+    return &Biscuit{
+        authority:  authority,
+        blocks:     blocks,
+        symbols:    b.symbols.Clone(),
+        container:  container,
+        rootPubKey: b.rootPubKey,
+        sealed:     true,
+    }
 }
 
 type (
@@ -302,15 +300,19 @@ type (
 	// corresponding public key, if any. If it doesn't recognize the ID or can't find the public
 	// key, or no ID is supplied and there is no default public key available, it should return an
 	// error satisfying errors.Is(err, ErrNoPublicKeyAvailable).
-	PublickKeyByIDProjection func(*uint32) (ed25519.PublicKey, error)
+	PublickKeyByIDProjection func(*uint32) ([]byte, error)
 )
 
 // WithSingularRootPublicKey supplies one public key to use as the root key with which to verify the
 // signatures on a biscuit's blocks.
-func WithSingularRootPublicKey(key ed25519.PublicKey) PublickKeyByIDProjection {
-	return func(*uint32) (ed25519.PublicKey, error) {
-		return key, nil
-	}
+func WithSingularRootPublicKey(key Kyber.Point) PublickKeyByIDProjection {
+    return func(*uint32) ([]byte, error) {
+        buf, err := key.MarshalBinary()
+        if err != nil {
+            return nil, err
+        }
+        return buf, nil
+    }
 }
 
 // WithRootPublicKeys supplies a mapping to public keys from their corresponding IDs, used to select
@@ -319,118 +321,164 @@ func WithSingularRootPublicKey(key ed25519.PublicKey) PublickKeyByIDProjection {
 // function selects the optional default key instead. If no public key is available—whether for the
 // biscuit's embedded key ID or a default key when no such ID is present—it returns
 // [ErrNoPublicKeyAvailable].
-func WithRootPublicKeys(keysByID map[uint32]ed25519.PublicKey, defaultKey *ed25519.PublicKey) PublickKeyByIDProjection {
-	return func(id *uint32) (ed25519.PublicKey, error) {
-		if id == nil {
-			if defaultKey != nil {
-				return *defaultKey, nil
-			}
-		} else if key, ok := keysByID[*id]; ok {
-			return key, nil
-		}
-		return nil, ErrNoPublicKeyAvailable
-	}
+func WithRootPublicKeys(keysByID map[uint32]Kyber.Point, defaultKey *Kyber.Point) PublickKeyByIDProjection {
+    return func(id *uint32) ([]byte, error) {
+        if id == nil {
+            if defaultKey != nil {
+                buf, err := (*defaultKey).MarshalBinary()
+                if err != nil {
+                    return nil, err
+                }
+                return buf, nil
+            }
+        } else if key, ok := keysByID[*id]; ok {
+            buf, err := key.MarshalBinary()
+            if err != nil {
+                return nil, err
+            }
+            return buf, nil
+        }
+        return nil, ErrNoPublicKeyAvailable
+    }
 }
 
-func (b *Biscuit) authorizerFor(root ed25519.PublicKey, opts ...AuthorizerOption) (Authorizer, error) {
-	currentKey := root
-
-	// for now we only support Ed25519
-	if *b.container.Authority.NextKey.Algorithm != pb.PublicKey_Ed25519 {
-		return nil, UnsupportedAlgorithm
+func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
+	if b.container == nil {
+		return nil, errors.New("biscuit: empty container")
 	}
 
-	algorithm := make([]byte, 4)
-	binary.LittleEndian.PutUint32(algorithm[0:], uint32(b.container.Authority.NextKey.Algorithm.Number()))
+	N := len(b.container.Blocks)
+	fmt.Printf("[DEBUG] Number of appended blocks: %d\n", N)
 
-	toVerify := append(b.container.Authority.Block[:], algorithm...)
-	toVerify = append(toVerify, b.container.Authority.NextKey.Key[:]...)
+	// -----------------------
+	// Caso trivial: apenas authority
+	// -----------------------
+	if N == 0 {
+		sigBytes := b.container.Authority.Signature
+		sig, err := schoco.ByteToSignature(sigBytes)
+		if err != nil {
+			return nil, fmt.Errorf("[DEBUG] Error converting authority signature to Signature: %v", err)
+		}
 
-	if ok := ed25519.Verify(currentKey, toVerify, b.container.Authority.Signature); !ok {
-		return nil, ErrInvalidSignature
+		msg := fmt.Sprintf("%s", b.container.Authority.Block)
+		fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(msg)))
+
+		if !schoco.StdVerify(msg, sig, rootPubKey) {
+			return nil, errors.New("invalid authority signature")
+		}
+		fmt.Println("[DEBUG] Authority-only signature verified")
+		return NewVerifier(b, opts...)
 	}
 
-	currentKey = b.container.Authority.NextKey.Key
-	if len(currentKey) != 32 {
-		return nil, ErrInvalidKeySize
+	// -----------------------
+	// Token estendido
+	// -----------------------
+	setMessages := make([]string, 0, N+1)
+	setPartSig := make([]Kyber.Point, 0, N)
+
+	// 1) Extrai R do authority
+	var authR Kyber.Point
+	authBytes := b.container.Authority.Signature
+	if pt, err := schoco.ByteToPoint(authBytes); err == nil {
+		authR = pt
+		fmt.Println("[DEBUG] Authority signature: extracted R point directly")
+	} else if sig, err2 := schoco.ByteToSignature(authBytes); err2 == nil {
+		authR = sig.R
+		fmt.Println("[DEBUG] Authority signature: extracted R from full Signature")
+	} else {
+		return nil, fmt.Errorf("[DEBUG] Cannot parse authority signature: %v / %v", err, err2)
 	}
 
-	for _, block := range b.container.Blocks {
-		if *block.NextKey.Algorithm != pb.PublicKey_Ed25519 {
-			return nil, UnsupportedAlgorithm
+	// adiciona Authority como última partial signature
+	setPartSig = append(setPartSig, authR)
+	setMessages = append(setMessages, fmt.Sprintf("%s", b.container.Authority.Block))
+	fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(b.container.Authority.Block)))
+	fmt.Printf("[DEBUG] PartialSig[Authority] (R hex): %x\n", authR)
+
+	// 2) Extrai R de todos os blocos (0..N-2)
+	for i := 0; i < N-1; i++ {
+		sb := b.container.Blocks[i]
+		if sb == nil {
+			return nil, fmt.Errorf("[DEBUG] missing SignedBlock at index %d", i)
 		}
 
-		algorithm := make([]byte, 4)
-		binary.LittleEndian.PutUint32(algorithm[0:], uint32(block.NextKey.Algorithm.Number()))
-		toVerify := append(block.Block[:], algorithm...)
-		toVerify = append(toVerify, block.NextKey.Key[:]...)
-
-		if ok := ed25519.Verify(currentKey, toVerify, block.Signature); !ok {
-			return nil, ErrInvalidSignature
+		var pt Kyber.Point
+		if p, err := schoco.ByteToPoint(sb.Signature); err == nil {
+			pt = p
+			fmt.Printf("[DEBUG] Block %d signature: extracted R point directly\n", i)
+		} else if s, err2 := schoco.ByteToSignature(sb.Signature); err2 == nil {
+			pt = s.R
+			fmt.Printf("[DEBUG] Block %d signature: extracted R from full Signature\n", i)
+		} else {
+			return nil, fmt.Errorf("[DEBUG] Cannot parse block %d signature: %v / %v", i, err, err2)
 		}
 
-		currentKey = block.NextKey.Key
-		if len(currentKey) != 32 {
-			return nil, ErrInvalidKeySize
-		}
+		setPartSig = append(setPartSig, pt)
+		setMessages = append(setMessages, fmt.Sprintf("%s", sb.Block))
+		fmt.Printf("[DEBUG] Msg[%d] SHA256: %s\n", i, sha256Hex([]byte(sb.Block)))
+		fmt.Printf("[DEBUG] PartialSig[%d] (R hex): %x\n", i, pt)
 	}
 
-	switch {
-	case b.container.Proof.GetNextSecret() != nil:
-		{
-			privateKey := b.container.Proof.GetNextSecret()
-			if privateKey == nil {
-				return nil, errors.New("biscuit: sealed token verification not implemented")
-			}
+	// 3) Último bloco -> assinatura completa
+	lastSB := b.container.Blocks[N-1]
+	if lastSB == nil {
+		return nil, errors.New("[DEBUG] missing last SignedBlock")
+	}
+	lastSig, err := schoco.ByteToSignature(lastSB.Signature)
+	if err != nil {
+		return nil, fmt.Errorf("[DEBUG] cannot parse last block signature: %v", err)
+	}
+	setMessages = append(setMessages, fmt.Sprintf("%s", lastSB.Block))
+	fmt.Printf("[DEBUG] Msg[last] SHA256: %s\n", sha256Hex([]byte(lastSB.Block)))
+	fmt.Printf("[DEBUG] LastSig: (r=%x, s=%x)\n", lastSig.R, lastSig.S)
 
-			publicKey := ed25519.NewKeyFromSeed(privateKey).Public()
-			if !bytes.Equal(currentKey, publicKey.(ed25519.PublicKey)) {
-				return nil, errors.New("biscuit: invalid last signature")
-			}
+	// -----------------------
+	// Inverte arrays para ordem esperada pelo Verify
+	// -----------------------
+	revMessages := reverseStrings(setMessages)
+	revPartSig := reversePoints(setPartSig)
+
+	if !schoco.Verify(rootPubKey, revMessages, revPartSig, lastSig) {
+		fmt.Println("[DEBUG] Verification failed with these parameters:")
+		for i, m := range revMessages {
+			fmt.Printf("[DEBUG] msg[%d] SHA256=%s len=%d\n", i, sha256Hex([]byte(m)), len(m))
 		}
-	case b.container.Proof.GetFinalSignature() != nil:
-		{
-			signature := b.container.Proof.GetFinalSignature()
-			var lastBlock *pb.SignedBlock
-			if len(b.blocks) == 0 {
-				lastBlock = b.container.Authority
-			} else {
-				lastBlock = b.container.Blocks[len(b.blocks)-1]
-			}
-
-			algorithm := make([]byte, 4)
-			binary.LittleEndian.PutUint32(algorithm[0:], uint32(lastBlock.NextKey.Algorithm.Number()))
-			toVerify := append(lastBlock.Block[:], algorithm...)
-			toVerify = append(toVerify, lastBlock.NextKey.Key[:]...)
-			toVerify = append(toVerify, lastBlock.Signature[:]...)
-
-			if ok := ed25519.Verify(currentKey, toVerify, signature); !ok {
-				return nil, errors.New("biscuit: invalid last signature")
-			}
+		for i, p := range revPartSig {
+			fmt.Printf("[DEBUG] part[%d] = %x\n", i, p)
 		}
-	default:
-		return nil, errors.New("biscuit: cannot find proof")
+		fmt.Printf("[DEBUG] lastSig: r=%x s=%x\n", lastSig.R, lastSig.S)
+		return nil, errors.New("invalid signature (extended)")
 	}
 
+	fmt.Println("[DEBUG] Extended signature verified")
 	return NewVerifier(b, opts...)
 }
+
 
 // AuthorizerFor selects from the supplied source a root public key to use to verify the signatures
 // on the biscuit's blocks, returning an error satisfying errors.Is(err, ErrNoPublicKeyAvailable) if
 // no such public key is available. If the signatures are valid, it creates an [Authorizer], which
 // can then test the authorization policies and accept or refuse the request.
 func (b *Biscuit) AuthorizerFor(keySource PublickKeyByIDProjection, opts ...AuthorizerOption) (Authorizer, error) {
-	if keySource == nil {
-		return nil, errors.New("root public key source must not be nil")
-	}
-	rootPublicKey, err := keySource(b.RootKeyID())
-	if err != nil {
-		return nil, fmt.Errorf("choosing root public key: %w", err)
-	}
-	if len(rootPublicKey) == 0 {
-		return nil, ErrNoPublicKeyAvailable
-	}
-	return b.authorizerFor(rootPublicKey, opts...)
+    if keySource == nil {
+        return nil, errors.New("root public key source must not be nil")
+    }
+
+    rootPublicKeyBytes, err := keySource(b.RootKeyID())
+    if err != nil {
+        return nil, fmt.Errorf("choosing root public key: %w", err)
+    }
+    if len(rootPublicKeyBytes) == 0 {
+        return nil, ErrNoPublicKeyAvailable
+    }
+
+    // Prefer using schoco.ByteToPoint so behavior is consistent with other code
+    rootPubPoint, err := schoco.ByteToPoint(rootPublicKeyBytes)
+    if err != nil {
+        return nil, fmt.Errorf("converting root public key to point: %w", err)
+    }
+
+    return b.authorizerFor(rootPubPoint, opts...)
 }
 
 // TODO: Add "Deprecated" note to the "(*Biscuit).Authorizer" method, recommending use of
@@ -439,7 +487,7 @@ func (b *Biscuit) AuthorizerFor(keySource PublickKeyByIDProjection, opts ...Auth
 
 // Authorizer checks the signature and creates an [Authorizer]. The Authorizer can then test the
 // authorizaion policies and accept or refuse the request.
-func (b *Biscuit) Authorizer(root ed25519.PublicKey, opts ...AuthorizerOption) (Authorizer, error) {
+func (b *Biscuit) Authorizer(root Kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
 	return b.authorizerFor(root)
 }
 
@@ -606,4 +654,71 @@ func (b *Biscuit) RevocationIds() [][]byte {
 		result = append(result, block.Signature)
 	}
 	return result
+}
+
+// LastBlockSignature retorna os bytes da última assinatura (se houver blocos,
+// retorna o Signature do último SignedBlock; caso contrário retorna a signature da Authority)
+func LastBlockSignature(b *Biscuit) ([]byte, error) {
+	if b == nil || b.container == nil {
+		return nil, errors.New("biscuit is nil or has no container")
+	}
+
+	blocks := b.container.Blocks
+	if len(blocks) == 0 {
+		// sem blocos: use a assinatura da authority
+		if b.container.Authority == nil || b.container.Authority.Signature == nil {
+			return nil, errors.New("biscuit: authority has no signature")
+		}
+		return b.container.Authority.Signature, nil
+	}
+
+	last := blocks[len(blocks)-1]
+	if last == nil || last.Signature == nil {
+		return nil, errors.New("biscuit: last block has no signature")
+	}
+	return last.Signature, nil
+}
+
+// ReplaceLastBlockSignature substitui a assinatura do último elemento (se houver blocos,
+// substitui o Signature do último SignedBlock; caso contrário, substitui a assinatura da Authority).
+func ReplaceLastBlockSignature(b *Biscuit, newSig []byte) error {
+	if b == nil || b.container == nil {
+		return errors.New("biscuit is nil or has no container")
+	}
+
+	// Se não existem blocks, substitui a assinatura da Authority
+	if len(b.container.Blocks) == 0 {
+		if b.container.Authority == nil {
+			return errors.New("biscuit: missing authority block")
+		}
+		b.container.Authority.Signature = newSig
+		return nil
+	}
+
+	// Caso normal: substitui a assinatura do último SignedBlock
+	lastIndex := len(b.container.Blocks) - 1
+	b.container.Blocks[lastIndex].Signature = newSig
+	return nil
+}
+
+// helper para SHA256 hex de um []byte
+func sha256Hex(b []byte) string {
+    h := sha256.Sum256(b)
+    return hex.EncodeToString(h[:])
+}
+
+// reverse helper (used only for debugging fallback; not normal flow)
+func reverseStrings(s []string) []string {
+    r := make([]string, len(s))
+    for i := range s {
+        r[i] = s[len(s)-1-i]
+    }
+    return r
+}
+func reversePoints(p []Kyber.Point) []Kyber.Point {
+    r := make([]Kyber.Point, len(p))
+    for i := range p {
+        r[i] = p[len(p)-1-i]
+    }
+    return r
 }
