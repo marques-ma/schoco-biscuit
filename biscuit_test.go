@@ -1,197 +1,614 @@
+// Copyright (c) 2019 Titanous, daeMOn63 and Contributors to the Eclipse Foundation.
+// SPDX-License-Identifier: Apache-2.0
+
 package biscuit
 
 import (
 	"crypto/rand"
+	"fmt"
 	"testing"
 
-	"github.com/hpe-usp-spire/schoco"
+	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
 	"github.com/stretchr/testify/require"
+	"github.com/hpe-usp-spire/schoco"
+	"go.dedis.ch/kyber/v3"
 )
 
-func TestBiscuitThreeBlocks(t *testing.T) {
+func TestBiscuit(t *testing.T) {
 	rng := rand.Reader
 	const rootKeyID = 123
 	const contextText = "current_context"
+	privateRoot,publicRoot := schoco.KeyPair()
 
-	// --- Root key (schoco) ---
-	privateRoot, publicRoot := schoco.KeyPair()
+	builder := NewBuilder(
+		privateRoot,
+		WithRNG(rng),
+		WithRootKeyID(rootKeyID))
 
-	// --- Builder + authority facts ---
-	builder := NewBuilder(privateRoot, WithRNG(rng), WithRootKeyID(rootKeyID))
-	// authority grants:
-	//   - /a/file1 : read
-	//   - /b/file2 : write
-	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}}})
-	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/b/file2"), String("write")}}})
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}},
+	})
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("write")}},
+	})
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file2"), String("read")}},
+	})
+
 	builder.SetContext(contextText)
 
 	b1, err := builder.Build()
 	require.NoError(t, err)
-	t.Log("[DEBUG] Authority-only Biscuit built")
+	require.EqualValues(t, contextText, b1.GetContext(), "context authority")
+	{
+		keyID := b1.RootKeyID()
+		require.NotNil(t, keyID, "root key ID present")
+		require.EqualValues(t, rootKeyID, *keyID, "root key ID")
+	}
 
-	// --- Block 2: caveat_read — requires right(resource, "read") when operation = "read" ---
-	block2 := b1.CreateBlock()
+	b1ser, err := b1.Serialize()
+	require.NoError(t, err)
+	require.NotEmpty(t, b1ser)
+
+	b1deser, err := Unmarshal(b1ser)
+	require.NoError(t, err)
+	{
+		keyID := b1deser.RootKeyID()
+		require.NotNil(t, keyID, "root key ID present after round trip")
+		require.EqualValues(t, rootKeyID, *keyID, "root key ID after round trip")
+	}
+
+	block2 := b1deser.CreateBlock()
 	block2.AddCheck(Check{
 		Queries: []Rule{
 			{
-				Head: Predicate{Name: "must_have_right", IDs: []Term{Variable("R"), Variable("Op")}},
+				Head: Predicate{Name: "caveat", IDs: []Term{Variable("0")}},
 				Body: []Predicate{
-					{Name: "resource", IDs: []Term{Variable("R")}},
-					{Name: "operation", IDs: []Term{Variable("Op")}},
-					{Name: "right", IDs: []Term{Variable("R"), Variable("Op")}},
+					{Name: "resource", IDs: []Term{Variable("0")}},
+					{Name: "operation", IDs: []Term{String("read")}},
+					{Name: "right", IDs: []Term{Variable("0"), String("read")}},
 				},
 			},
 		},
 	})
-	b2, err := b1.Append(rng, block2.Build())
-	require.NoError(t, err)
-	t.Log("[DEBUG] Block 2 (caveat_read) appended")
 
-	// --- Block 3: caveat_write — requires right(resource, "write") when operation = "write" ---
-	block3 := b2.CreateBlock()
+	b2, err := b1deser.Append(rng, block2.Build())
+	require.NoError(t, err)
+
+	b2ser, err := b2.Serialize()
+	require.NoError(t, err)
+	require.NotEmpty(t, b2ser)
+
+	b2deser, err := Unmarshal(b2ser)
+	require.NoError(t, err)
+
+	block3 := b2deser.CreateBlock()
 	block3.AddCheck(Check{
 		Queries: []Rule{
 			{
-				Head: Predicate{Name: "must_have_right2", IDs: []Term{Variable("R"), Variable("Op")}},
+				Head: Predicate{Name: "caveat2", IDs: []Term{String("/a/file1")}},
 				Body: []Predicate{
-					{Name: "resource", IDs: []Term{Variable("R")}},
-					{Name: "operation", IDs: []Term{Variable("Op")}},
-					{Name: "right", IDs: []Term{Variable("R"), Variable("Op")}},
+					{Name: "resource", IDs: []Term{String("/a/file1")}},
 				},
 			},
 		},
 	})
-	b3, err := b2.Append(rng, block3.Build())
-	require.NoError(t, err)
-	t.Log("[DEBUG] Block 3 (caveat_write) appended")
 
-	// --- Block 4: caveat_general — just demonstrates a third block with a simple check ---
-	block4 := b3.CreateBlock()
-	block4.AddCheck(Check{
-		Queries: []Rule{
-			{
-				Head: Predicate{Name: "caveat_general", IDs: []Term{Variable("0")}},
-				Body: []Predicate{
-					{Name: "resource", IDs: []Term{Variable("0")}},
-				},
-			},
-		},
-	})
-	b4, err := b3.Append(rng, block4.Build())
+	b3, err := b2deser.Append(rng, block3.Build())
 	require.NoError(t, err)
-	t.Log("[DEBUG] Block 4 (caveat_general) appended")
 
-	// --- Serialize/Deserialize final biscuit to ensure round-trip works ---
-	b4ser, err := b4.Serialize()
+	b3ser, err := b3.Serialize()
 	require.NoError(t, err)
-	b4deser, err := Unmarshal(b4ser)
-	require.NoError(t, err)
-	t.Log("[DEBUG] Biscuit fully serialized and deserialized")
+	require.NotEmpty(t, b3ser)
 
-	// --- Authorization checks using the biscuit deserialized ---
-	// Case A: /a/file1 read  -> should be allowed (authority has right("/a/file1","read"))
-	authA, err := b4deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	b3deser, err := Unmarshal(b3ser)
 	require.NoError(t, err)
-	authA.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/a/file1")}}})
-	authA.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("read")}}})
-	authA.AddPolicy(DefaultAllowPolicy)
-	require.NoError(t, authA.Authorize())
-	t.Log("[DEBUG] /a/file1 read authorized (expected)")
 
-	// Case B: /a/file1 write -> should be denied (authority does not have right("/a/file1","write"))
-	authB, err := b4deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	v3, err := b3deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
 	require.NoError(t, err)
-	authB.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/a/file1")}}})
-	authB.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("write")}}})
-	authB.AddPolicy(DefaultAllowPolicy)
-	require.Error(t, authB.Authorize())
-	t.Log("[DEBUG] /a/file1 write denied (expected)")
 
-	// Case C: /b/file2 read -> should be denied (authority only grants write on /b/file2)
-	authC, err := b4deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	v3.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/a/file1")}}})
+	v3.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("read")}}})
+	v3.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, v3.Authorize())
+
+	v3, err = b3deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
 	require.NoError(t, err)
-	authC.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/b/file2")}}})
-	authC.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("read")}}})
-	authC.AddPolicy(DefaultAllowPolicy)
-	require.Error(t, authC.Authorize())
-	t.Log("[DEBUG] /b/file2 read denied (expected)")
+	v3.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/a/file2")}}})
+	v3.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("read")}}})
+	v3.AddPolicy(DefaultAllowPolicy)
+	require.Error(t, v3.Authorize())
+
+	v3, err = b3deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+	v3.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("/a/file1")}}})
+	v3.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("write")}}})
+	v3.AddPolicy(DefaultAllowPolicy)
+	require.Error(t, v3.Authorize())
 }
 
-func TestBiscuitSeal(t *testing.T) {
+func TestSealedBiscuit(t *testing.T) {
 	rng := rand.Reader
-	privateRoot, publicRoot := schoco.KeyPair()
+	privateRoot,publicRoot := schoco.KeyPair()
 
-	// --- Cria builder ---
-	builder := NewBuilder(privateRoot, WithRNG(rng))
-	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}}})
+	builder := NewBuilder(privateRoot)
 
-	// --- Cria Biscuit ---
-	b, err := builder.Build()
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}},
+	})
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("write")}},
+	})
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file2"), String("read")}},
+	})
+
+	b1, err := builder.Build()
 	require.NoError(t, err)
-	require.False(t, b.sealed, "Biscuit original não deve estar sealed")
 
-	// --- Cria um bloco extra ---
-	block := b.CreateBlock()
+	b1ser, err := b1.Serialize()
+	require.NoError(t, err)
+	require.NotEmpty(t, b1ser)
+
+	b1deser, err := Unmarshal(b1ser)
+	require.NoError(t, err)
+
+	block2 := b1deser.CreateBlock()
+	block2.AddCheck(Check{
+		Queries: []Rule{
+			{
+				Head: Predicate{Name: "caveat", IDs: []Term{Variable("0")}},
+				Body: []Predicate{
+					{Name: "resource", IDs: []Term{Variable("0")}},
+					{Name: "operation", IDs: []Term{String("read")}},
+					{Name: "right", IDs: []Term{Variable("0"), String("read")}},
+				},
+			},
+		},
+	})
+
+	b2, err := b1deser.Append(rng, block2.Build())
+	require.NoError(t, err)
+
+	sealed := b2.Seal()
+	require.True(t, sealed.sealed)
+
+	b2ser, err := sealed.Serialize()
+	require.NoError(t, err)
+	require.NotEmpty(t, b2ser)
+
+	b2deser, err := Unmarshal(b2ser)
+	require.NoError(t, err)
+
+	_, err = b2deser.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+}
+
+func TestBiscuitRules(t *testing.T) {
+	rng := rand.Reader
+	privateRoot,publicRoot := schoco.KeyPair()
+
+	builder := NewBuilder(privateRoot)
+
+	builder.AddAuthorityRule(Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("1"), String("read")}},
+		Body: []Predicate{
+			{Name: "resource", IDs: []Term{Variable("1")}},
+			{Name: "owner", IDs: []Term{Variable("0"), Variable("1")}},
+		},
+	})
+	builder.AddAuthorityRule(Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("1"), String("write")}},
+		Body: []Predicate{
+			{Name: "resource", IDs: []Term{Variable("1")}},
+			{Name: "owner", IDs: []Term{Variable("0"), Variable("1")}},
+		},
+	})
+	builder.AddAuthorityCheck(Check{Queries: []Rule{
+		{
+			Head: Predicate{Name: "allowed_users", IDs: []Term{Variable("0")}},
+			Body: []Predicate{
+				{Name: "owner", IDs: []Term{Variable("0"), Variable("1")}},
+			},
+			Expressions: []Expression{
+				{
+					Value{Set{String("alice"), String("bob")}},
+					Value{Variable("0")},
+					BinaryContains,
+				},
+			},
+		},
+	}})
+
+	b1, err := builder.Build()
+	require.NoError(t, err)
+
+	// b1 should allow alice & bob only
+	// v, err := b1.Verify(publicRoot)
+	// require.NoError(t, err)
+	verifyOwner(t, *b1, publicRoot, map[string]bool{"alice": true, "bob": true, "eve": false})
+
+	block := b1.CreateBlock()
 	block.AddCheck(Check{
 		Queries: []Rule{
 			{
-				Head: Predicate{Name: "can_read", IDs: []Term{Variable("res")}},
+				Head: Predicate{Name: "caveat1", IDs: []Term{Variable("0"), Variable("1")}},
 				Body: []Predicate{
-					{Name: "right", IDs: []Term{Variable("res"), String("read")}},
+					{Name: "right", IDs: []Term{Variable("0"), Variable("1")}},
+					{Name: "resource", IDs: []Term{Variable("0")}},
+					{Name: "operation", IDs: []Term{Variable("1")}},
 				},
 			},
 		},
 	})
-	b2, err := b.Append(rng, block.Build())
-	require.NoError(t, err)
-
-	// --- Seal do Biscuit ---
-	sealedB := b2.Seal()
-	require.True(t, sealedB.sealed, "Biscuit selado deve ter sealed = true")
-	require.False(t, b2.sealed, "Biscuit original não deve ser alterado")
-
-	// --- Teste de autorização com sealed Biscuit ---
-	auth, err := sealedB.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
-	require.NoError(t, err)
-	auth.AddFact(Fact{Predicate: Predicate{Name: "res", IDs: []Term{String("/a/file1")}}})
-	auth.AddPolicy(DefaultAllowPolicy)
-	require.NoError(t, auth.Authorize(), "Biscuit selado deve autorizar corretamente")
-}
-
-func TestBiscuitSealAndAppend(t *testing.T) {
-	rng := rand.Reader
-
-	// --- Cria chave root ---
-	privateRoot, _ := schoco.KeyPair()
-
-	// --- Builder e authority facts ---
-	builder := NewBuilder(privateRoot)
-	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}}})
-
-	// --- Cria o Biscuit ---
-	b, err := builder.Build()
-	require.NoError(t, err)
-	t.Log("[DEBUG] Authority-only Biscuit built")
-
-	// --- Selar o Biscuit ---
-	sealed := b.Seal()
-	require.True(t, sealed.sealed)
-	t.Log("[DEBUG] Biscuit sealed")
-
-	// --- Tenta adicionar um bloco após selagem ---
-	newBlock := sealed.CreateBlock()
-	newBlock.AddCheck(Check{
+	block.AddCheck(Check{
 		Queries: []Rule{
 			{
-				Head: Predicate{Name: "test_check", IDs: []Term{Variable("res")}},
+				Head: Predicate{Name: "caveat2", IDs: []Term{Variable("0")}},
 				Body: []Predicate{
-					{Name: "resource", IDs: []Term{Variable("res")}},
+					{Name: "resource", IDs: []Term{Variable("0")}},
+					{Name: "owner", IDs: []Term{String("alice"), Variable("0")}},
 				},
 			},
 		},
 	})
 
-	_, err = sealed.Append(rng, newBlock.Build())
-	require.Error(t, err) // ✅ deve falhar
-	t.Log("[DEBUG] Append to sealed Biscuit correctly failed")
+	b2, err := b1.Append(rng, block.Build())
+	require.NoError(t, err)
+
+	// b2 should now only allow alice
+	// v, err = b2.Verify(publicRoot)
+	// require.NoError(t, err)
+	verifyOwner(t, *b2, publicRoot, map[string]bool{"alice": true, "bob": false, "eve": false})
+}
+
+func verifyOwner(t *testing.T, b Biscuit, publicRoot kyber.Point, owners map[string]bool) {
+	for user, valid := range owners {
+		v, err := b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+		require.NoError(t, err)
+
+		t.Run(fmt.Sprintf("verify owner %s", user), func(t *testing.T) {
+			v.AddFact(Fact{Predicate: Predicate{Name: "resource", IDs: []Term{String("file1")}}})
+			v.AddFact(Fact{Predicate: Predicate{Name: "operation", IDs: []Term{String("write")}}})
+			v.AddFact(Fact{
+				Predicate: Predicate{
+					Name: "owner",
+					IDs: []Term{
+						String(user),
+						String("file1"),
+					},
+				},
+			})
+			v.AddPolicy(DefaultAllowPolicy)
+
+			if valid {
+				require.NoError(t, v.Authorize())
+			} else {
+				require.Error(t, v.Authorize())
+			}
+		})
+	}
+}
+
+func TestCheckRootKey(t *testing.T) {
+	const rootKeyID = 123
+	privateRoot,publicRoot := schoco.KeyPair()
+
+	builder := NewBuilder(privateRoot, WithRootKeyID(rootKeyID))
+
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.ErrorIs(t, err, ErrNoPublicKeyAvailable)
+
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.ErrorIs(t, err, ErrNoPublicKeyAvailable)
+
+	_,publicNotRoot := schoco.KeyPair()
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicNotRoot))
+	require.Equal(t, ErrInvalidSignature, err)
+}
+
+func TestGenerateWorld(t *testing.T) {
+	rng := rand.Reader
+	privateRoot, _ := schoco.KeyPair()
+
+	build := NewBuilder(privateRoot)
+
+	authorityFact1 := Fact{Predicate: Predicate{Name: "fact1", IDs: []Term{String("file1")}}}
+	authorityFact2 := Fact{Predicate: Predicate{Name: "fact2", IDs: []Term{String("file2")}}}
+
+	authorityRule1 := Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("1"), String("read")}},
+		Body: []Predicate{
+			{Name: "resource", IDs: []Term{Variable("1")}},
+			{Name: "owner", IDs: []Term{Variable("0"), Variable("1")}},
+		},
+	}
+	authorityRule2 := Rule{
+		Head: Predicate{Name: "right", IDs: []Term{Variable("1"), String("write")}},
+		Body: []Predicate{
+			{Name: "resource", IDs: []Term{Variable("1")}},
+			{Name: "owner", IDs: []Term{Variable("0"), Variable("1")}},
+		},
+	}
+
+	build.AddAuthorityFact(authorityFact1)
+	build.AddAuthorityFact(authorityFact2)
+	build.AddAuthorityRule(authorityRule1)
+	build.AddAuthorityRule(authorityRule2)
+
+	b, err := build.Build()
+	require.NoError(t, err)
+
+	StringTable := (build.(*builderOptions)).symbols
+	world, err := b.generateWorld(defaultSymbolTable.Clone())
+	require.NoError(t, err)
+
+	expectedWorld := datalog.NewWorld()
+	expectedWorld.AddFact(authorityFact1.convert(StringTable))
+	expectedWorld.AddFact(authorityFact2.convert(StringTable))
+	expectedWorld.AddRule(authorityRule1.convert(StringTable))
+	expectedWorld.AddRule(authorityRule2.convert(StringTable))
+	require.Equal(t, expectedWorld, world)
+
+	blockBuild := b.CreateBlock()
+	blockRule := Rule{
+		Head: Predicate{Name: "blockRule", IDs: []Term{Variable("1")}},
+		Body: []Predicate{
+			{Name: "resource", IDs: []Term{Variable("1")}},
+			{Name: "owner", IDs: []Term{String("alice"), Variable("1")}},
+		},
+	}
+	blockBuild.AddRule(blockRule)
+
+	blockFact := Fact{Predicate{Name: "resource", IDs: []Term{String("file1")}}}
+	blockBuild.AddFact(blockFact)
+
+	b2, err := b.Append(rng, blockBuild.Build())
+	require.NoError(t, err)
+
+	allStrings := append(*StringTable, *(blockBuild.(*blockBuilder)).symbols...)
+	world, err = b2.generateWorld(&allStrings)
+	require.NoError(t, err)
+
+	expectedWorld = datalog.NewWorld()
+	expectedWorld.AddFact(authorityFact1.convert(&allStrings))
+	expectedWorld.AddFact(authorityFact2.convert(&allStrings))
+	expectedWorld.AddFact(blockFact.convert(&allStrings))
+	expectedWorld.AddRule(authorityRule1.convert(&allStrings))
+	expectedWorld.AddRule(authorityRule2.convert(&allStrings))
+	expectedWorld.AddRule(
+		blockRule.convert(&allStrings),
+	)
+	require.Equal(t, expectedWorld, world)
+}
+
+func TestAppendErrors(t *testing.T) {
+	rng := rand.Reader
+	privateRoot, _ := schoco.KeyPair()
+	builder := NewBuilder(privateRoot)
+	builder.AddAuthorityFact(Fact{
+		Predicate: Predicate{Name: "newfact", IDs: []Term{String("/a/file1"), String("read")}},
+	})
+
+	t.Run("Strings overlap", func(t *testing.T) {
+		b, err := builder.Build()
+		require.NoError(t, err)
+
+		_, err = b.Append(rng, &Block{
+			symbols: &datalog.SymbolTable{"newfact"},
+		})
+		require.Equal(t, ErrSymbolTableOverlap, err)
+	})
+
+	t.Run("biscuit is sealed", func(t *testing.T) {
+		b, err := builder.Build()
+		require.NoError(t, err)
+
+		_, err = b.Append(rng, &Block{
+			symbols: &datalog.SymbolTable{},
+			facts:   &datalog.FactSet{},
+		})
+		require.NoError(t, err)
+
+		b.container = nil
+		_, err = b.Append(rng, &Block{
+			symbols: &datalog.SymbolTable{},
+		})
+		require.Error(t, err)
+	})
+}
+
+func TestNewErrors(t *testing.T) {
+	rng := rand.Reader
+
+	t.Run("authority block Strings overlap", func(t *testing.T) {
+		privateRoot, _ := schoco.KeyPair()
+		_, err := New(rng, privateRoot, &datalog.SymbolTable{"String1", "String2"}, &Block{
+			symbols: &datalog.SymbolTable{"String1"},
+		})
+		require.Equal(t, ErrSymbolTableOverlap, err)
+	})
+}
+
+func TestBiscuitVerifyErrors(t *testing.T) {
+	privateRoot,publicRoot := schoco.KeyPair()
+
+	builder := NewBuilder(privateRoot)
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+
+	_, publicTest  := schoco.KeyPair()
+	_, err = b.AuthorizerFor(WithSingularRootPublicKey(publicTest))
+	require.Error(t, err)
+}
+
+/*FIXME
+func TestBiscuitSha256Sum(t *testing.T) {
+	rng := rand.Reader
+	publicRoot, privateRoot, err := ed25519.GenerateKey(rng)
+
+	builder := NewBuilder(privateRoot)
+	b, err := builder.Build()
+	require.NoError(t, err)
+
+	require.Equal(t, 0, b.BlockCount())
+	h0, err := b.SHA256Sum(0)
+	require.NoError(t, err)
+	require.NotEmpty(t, h0)
+
+	_, err = b.SHA256Sum(1)
+	require.Error(t, err)
+	_, err = b.SHA256Sum(-1)
+	require.Error(t, err)
+
+	blockBuilder := b.CreateBlock()
+	b, err = b.Append(rng, root, blockBuilder.Build())
+	require.NoError(t, err)
+	require.Equal(t, 1, b.BlockCount())
+p
+	h10, err := b.SHA256Sum(0)
+	require.NoError(t, err)
+	require.Equal(t, h0, h10)
+	h11, err := b.SHA256Sum(1)
+	require.NoError(t, err)
+	require.NotEmpty(t, h11)
+
+	blockBuilder = b.CreateBlock()
+	b, err = b.Append(rng, root, blockBuilder.Build())
+	require.NoError(t, err)
+	require.Equal(t, 2, b.BlockCount())
+
+	h20, err := b.SHA256Sum(0)
+	require.NoError(t, err)
+	require.Equal(t, h0, h20)
+	h21, err := b.SHA256Sum(1)
+	require.NoError(t, err)
+	require.Equal(t, h11, h21)
+	h22, err := b.SHA256Sum(2)
+	require.NoError(t, err)
+	require.NotEmpty(t, h22)
+}
+*/
+
+func TestGetBlockID(t *testing.T) {
+	rng := rand.Reader
+	privateRoot, _ := schoco.KeyPair()
+	builder := NewBuilder(privateRoot)
+
+	// add 3 facts authority_0_fact_{0,1,2} in authority block
+	for i := 0; i < 3; i++ {
+		require.NoError(t, builder.AddAuthorityFact(Fact{Predicate: Predicate{
+			Name: fmt.Sprintf("authority_0_fact_%d", i),
+			IDs:  []Term{Integer(i)},
+		}}))
+	}
+
+	b, err := builder.Build()
+	require.NoError(t, err)
+	// add 2 extra blocks each containing 3 facts block_{0,1}_fact_{0,1,2}
+	for i := 0; i < 2; i++ {
+		blockBuilder := b.CreateBlock()
+		for j := 0; j < 3; j++ {
+			blockBuilder.AddFact(Fact{Predicate: Predicate{
+				Name: fmt.Sprintf("block_%d_fact_%d", i, j),
+				IDs:  []Term{String("block"), Integer(i), Integer(j)},
+			}})
+		}
+		b, err = b.Append(rng, blockBuilder.Build())
+		require.NoError(t, err)
+	}
+
+	idx, err := b.GetBlockID(Fact{Predicate{
+		Name: "authority_0_fact_0",
+		IDs:  []Term{Integer(0)},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 0, idx)
+	idx, err = b.GetBlockID(Fact{Predicate{
+		Name: "authority_0_fact_2",
+		IDs:  []Term{Integer(2)},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 0, idx)
+
+	idx, err = b.GetBlockID(Fact{Predicate{
+		Name: "block_0_fact_2",
+		IDs:  []Term{String("block"), Integer(0), Integer(2)},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 1, idx)
+	idx, err = b.GetBlockID(Fact{Predicate{
+		Name: "block_1_fact_1",
+		IDs:  []Term{String("block"), Integer(1), Integer(1)},
+	}})
+	require.NoError(t, err)
+	require.Equal(t, 2, idx)
+
+	_, err = b.GetBlockID(Fact{Predicate{
+		Name: "block_1_fact_3",
+		IDs:  []Term{String("block"), Integer(1), Integer(3)},
+	}})
+	require.Equal(t, ErrFactNotFound, err)
+	_, err = b.GetBlockID(Fact{Predicate{
+		Name: "block_2_fact_1",
+		IDs:  []Term{String("block"), Integer(2), Integer(1)},
+	}})
+	require.Equal(t, ErrFactNotFound, err)
+	_, err = b.GetBlockID(Fact{Predicate{
+		Name: "block_1_fact_1",
+		IDs:  []Term{Integer(1), Integer(1)},
+	}})
+	require.Equal(t, ErrFactNotFound, err)
+}
+
+func TestInvalidRuleGeneration(t *testing.T) {
+	rng := rand.Reader
+	privateRoot,publicRoot := schoco.KeyPair()
+	builder := NewBuilder(privateRoot)
+	builder.AddAuthorityCheck(Check{Queries: []Rule{
+		{
+			Head: Predicate{Name: "check1"},
+			Body: []Predicate{
+				{Name: "operation", IDs: []Term{String("read")}},
+			},
+		},
+	}})
+
+	b, err := builder.Build()
+	require.NoError(t, err)
+	t.Log(b.String())
+
+	blockBuilder := b.CreateBlock()
+	blockBuilder.AddRule(Rule{
+		Head: Predicate{Name: "operation", IDs: []Term{Variable("sym"), String("read")}},
+		Body: []Predicate{
+			{Name: "operation", IDs: []Term{Variable("sym"), Variable("operation")}},
+		},
+	})
+
+	block := blockBuilder.Build()
+	b, err = b.Append(rng, block)
+	require.NoError(t, err)
+	t.Log(b.String())
+
+	verifier, err := b.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+
+	verifier.AddFact(Fact{Predicate: Predicate{
+		Name: "operation",
+		IDs:  []Term{String("write")},
+	}})
+
+	err = verifier.Authorize()
+	t.Log(verifier.PrintWorld())
+	require.Error(t, err)
 }

@@ -120,7 +120,7 @@ func newBiscuit(root kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *
     // dummy nextKey para satisfazer protobuf
     nextKey := &pb.PublicKey{
         Algorithm: &algorithm,
-        Key:       make([]byte, 32), // dummy 32 bytes
+        Key:       []byte{}, // dummy 32 bytes
     }
 
     signedBlock := &pb.SignedBlock{
@@ -131,7 +131,7 @@ func newBiscuit(root kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *
 
 	proof := &pb.Proof{
 		Content: &pb.Proof_NextSecret{
-			NextSecret: sigBytes,
+			NextSecret: []byte{},
 		},
 	}
 
@@ -231,7 +231,7 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 	algorithm := pb.PublicKey_Ed25519
 	nextKey := &pb.PublicKey{
 		Algorithm: &algorithm,
-		Key:       sig2Byte,
+		Key:       []byte{},
 	}
 
 	signedBlock := &pb.SignedBlock{
@@ -242,7 +242,7 @@ func (b *Biscuit) Append(rng io.Reader, block *Block) (*Biscuit, error) {
 
 	proof := &pb.Proof{
 		Content: &pb.Proof_NextSecret{
-			NextSecret: sig2Byte,
+			NextSecret: []byte{},
 		},
 	}
 
@@ -279,10 +279,22 @@ func (b *Biscuit) Seal() *Biscuit {
         *blocks[i] = *blk
     }
 
+	sig2Byte, err := LastBlockSignature(b)
+	if err != nil {
+		return nil
+	}
+	
+	proof := &pb.Proof{
+		Content: &pb.Proof_NextSecret{
+			NextSecret: sig2Byte,
+		},
+	}
+
     container := &pb.Biscuit{
         Authority: b.container.Authority,
         Blocks:    append([]*pb.SignedBlock{}, b.container.Blocks...),
         RootKeyId: b.container.RootKeyId,
+		Proof:     proof,
     }
 
     return &Biscuit{
@@ -707,7 +719,6 @@ func sha256Hex(b []byte) string {
     return hex.EncodeToString(h[:])
 }
 
-// reverse helper (used only for debugging fallback; not normal flow)
 func reverseStrings(s []string) []string {
     r := make([]string, len(s))
     for i := range s {
