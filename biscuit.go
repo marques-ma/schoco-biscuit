@@ -13,8 +13,8 @@ import (
     "encoding/hex"
 
 
-	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
-	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
+	"github.com/marques-ma/schoco-biscuit/datalog"
+	"github.com/marques-ma/schoco-biscuit/pb"
 
 	"google.golang.org/protobuf/proto"
 	"github.com/hpe-usp-spire/schoco"

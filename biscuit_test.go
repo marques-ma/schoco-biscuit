@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/marques-ma/schoco-biscuit/datalog"
 	"github.com/stretchr/testify/require"
 	"github.com/hpe-usp-spire/schoco"
 	"go.dedis.ch/kyber/v3"

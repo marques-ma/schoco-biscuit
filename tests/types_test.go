@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/marques-ma/schoco-biscuit/datalog"
 	"github.com/stretchr/testify/require"
 )
 

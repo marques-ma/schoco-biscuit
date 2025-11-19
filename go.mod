@@ -1,4 +1,4 @@
-module github.com/eclipse-biscuit/biscuit-go/v2
+module github.com/marques-ma/schoco-biscuit
 
 go 1.19
 

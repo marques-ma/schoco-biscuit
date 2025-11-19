@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/participle/v2"
-	"github.com/eclipse-biscuit/biscuit-go/v2"
+	"github.com/marques-ma/schoco-biscuit"
 	"github.com/stretchr/testify/require"
 )
 

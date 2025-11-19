@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2"
+	"github.com/marques-ma/schoco-biscuit"
 	"github.com/eclipse-biscuit/biscuit-go/sig"
 	"github.com/stretchr/testify/require"
 )

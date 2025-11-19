@@ -13,7 +13,7 @@ import (
 
 	"github.com/alecthomas/participle/v2"
 	"github.com/alecthomas/participle/v2/lexer"
-	"github.com/eclipse-biscuit/biscuit-go/v2"
+	"github.com/marques-ma/schoco-biscuit"
 )
 
 type Comment string

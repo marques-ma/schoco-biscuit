@@ -13,8 +13,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2"
-	"github.com/eclipse-biscuit/biscuit-go/v2/parser"
+	"github.com/marques-ma/schoco-biscuit"
+	"github.com/marques-ma/schoco-biscuit/parser"
 	"github.com/stretchr/testify/require"
 )
 

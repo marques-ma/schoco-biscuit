@@ -8,8 +8,8 @@ import (
 	"errors"
 	"io"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
-	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
+	"github.com/marques-ma/schoco-biscuit/datalog"
+	"github.com/marques-ma/schoco-biscuit/pb"
 
 	//"github.com/eclipse-biscuit/biscuit-go/sig"
 	"google.golang.org/protobuf/proto"
