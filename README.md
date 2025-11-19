@@ -1,3 +1,5 @@
+# Important
+This fork implements schoco-biscuit, a Biscuit version wich implements SchoCo half-aggregation signature scheme. It is a prototype for a proof of concept, developed for academic purposes **only**.
 
 # biscuit-go
 
