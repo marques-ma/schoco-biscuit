@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2"
-	"github.com/eclipse-biscuit/biscuit-go/v2/parser"
+	"github.com/biscuit-auth/biscuit-go/v2"
+	"github.com/biscuit-auth/biscuit-go/v2/parser"
 )
 
 // code examples for the documentation at https://www.biscuitsec.org

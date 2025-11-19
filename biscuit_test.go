@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/eclipse-biscuit/biscuit-go/v2/datalog"
+	"github.com/biscuit-auth/biscuit-go/v2/datalog"
 	"github.com/stretchr/testify/require"
 )
 
