@@ -13,7 +13,7 @@ import (
 
 	//"github.com/eclipse-biscuit/biscuit-go/sig"
 	"google.golang.org/protobuf/proto"
-	Kyber "go.dedis.ch/kyber/v3"
+	"go.dedis.ch/kyber/v3"
 )
 
 var (
@@ -32,7 +32,7 @@ type Builder interface {
 
 type builderOptions struct {
 	rng       io.Reader
-	rootKey   Kyber.Scalar
+	rootKey   kyber.Scalar
 	rootKeyID *uint32
 
 	symbolsStart int
@@ -61,7 +61,7 @@ func WithSymbols(symbols *datalog.SymbolTable) builderOption {
 	return symbolsOption{symbols}
 }
 
-func NewBuilder(root Kyber.Scalar, opts ...builderOption) Builder {
+func NewBuilder(root kyber.Scalar, opts ...builderOption) Builder {
 	b := &builderOptions{
 		rootKey:      root,
 		symbols:      defaultSymbolTable.Clone(),

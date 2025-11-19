@@ -17,9 +17,9 @@ import (
 	"github.com/eclipse-biscuit/biscuit-go/v2/pb"
 
 	"google.golang.org/protobuf/proto"
-	 "github.com/hpe-usp-spire/schoco"
+	"github.com/hpe-usp-spire/schoco"
 
-	Kyber "go.dedis.ch/kyber/v3"
+	"go.dedis.ch/kyber/v3"
 	"go.dedis.ch/kyber/v3/group/edwards25519"
 )
 
@@ -76,7 +76,7 @@ type biscuitOption interface {
 	applyToBiscuit(*biscuitOptions) error
 }
 
-func newBiscuit(root Kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block, opts ...biscuitOption) (*Biscuit, error) {
+func newBiscuit(root kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block, opts ...biscuitOption) (*Biscuit, error) {
     rootPubKey := curve.Point().Mul(root, g)
     schocoRootPubKey, err := schoco.PointToByte(rootPubKey)
     if err != nil {
@@ -149,7 +149,7 @@ func newBiscuit(root Kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *
     }, nil
 }
 
-func New(rng io.Reader, root Kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block) (*Biscuit, error) {
+func New(rng io.Reader, root kyber.Scalar, baseSymbols *datalog.SymbolTable, authority *Block) (*Biscuit, error) {
 	var opts []biscuitOption
 	if rng != nil {
 		opts = []biscuitOption{WithRNG(rng)}
@@ -305,7 +305,7 @@ type (
 
 // WithSingularRootPublicKey supplies one public key to use as the root key with which to verify the
 // signatures on a biscuit's blocks.
-func WithSingularRootPublicKey(key Kyber.Point) PublickKeyByIDProjection {
+func WithSingularRootPublicKey(key kyber.Point) PublickKeyByIDProjection {
     return func(*uint32) ([]byte, error) {
         buf, err := key.MarshalBinary()
         if err != nil {
@@ -321,7 +321,7 @@ func WithSingularRootPublicKey(key Kyber.Point) PublickKeyByIDProjection {
 // function selects the optional default key instead. If no public key is available—whether for the
 // biscuit's embedded key ID or a default key when no such ID is present—it returns
 // [ErrNoPublicKeyAvailable].
-func WithRootPublicKeys(keysByID map[uint32]Kyber.Point, defaultKey *Kyber.Point) PublickKeyByIDProjection {
+func WithRootPublicKeys(keysByID map[uint32]kyber.Point, defaultKey *kyber.Point) PublickKeyByIDProjection {
     return func(id *uint32) ([]byte, error) {
         if id == nil {
             if defaultKey != nil {
@@ -342,13 +342,13 @@ func WithRootPublicKeys(keysByID map[uint32]Kyber.Point, defaultKey *Kyber.Point
     }
 }
 
-func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
+func (b *Biscuit) authorizerFor(rootPubKey kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
 	if b.container == nil {
 		return nil, errors.New("biscuit: empty container")
 	}
 
 	N := len(b.container.Blocks)
-	fmt.Printf("[DEBUG] Number of appended blocks: %d\n", N)
+	// fmt.Printf("[DEBUG] Number of appended blocks: %d\n", N)
 
 	// -----------------------
 	// Caso trivial: apenas authority
@@ -361,12 +361,12 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 		}
 
 		msg := fmt.Sprintf("%s", b.container.Authority.Block)
-		fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(msg)))
+		// fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(msg)))
 
 		if !schoco.StdVerify(msg, sig, rootPubKey) {
 			return nil, errors.New("invalid authority signature")
 		}
-		fmt.Println("[DEBUG] Authority-only signature verified")
+		// fmt.Println("[DEBUG] Authority-only signature verified")
 		return NewVerifier(b, opts...)
 	}
 
@@ -374,17 +374,17 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 	// Token estendido
 	// -----------------------
 	setMessages := make([]string, 0, N+1)
-	setPartSig := make([]Kyber.Point, 0, N)
+	setPartSig := make([]kyber.Point, 0, N)
 
 	// 1) Extrai R do authority
-	var authR Kyber.Point
+	var authR kyber.Point
 	authBytes := b.container.Authority.Signature
 	if pt, err := schoco.ByteToPoint(authBytes); err == nil {
 		authR = pt
-		fmt.Println("[DEBUG] Authority signature: extracted R point directly")
+		// fmt.Println("[DEBUG] Authority signature: extracted R point directly")
 	} else if sig, err2 := schoco.ByteToSignature(authBytes); err2 == nil {
 		authR = sig.R
-		fmt.Println("[DEBUG] Authority signature: extracted R from full Signature")
+		// fmt.Println("[DEBUG] Authority signature: extracted R from full Signature")
 	} else {
 		return nil, fmt.Errorf("[DEBUG] Cannot parse authority signature: %v / %v", err, err2)
 	}
@@ -392,8 +392,8 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 	// adiciona Authority como última partial signature
 	setPartSig = append(setPartSig, authR)
 	setMessages = append(setMessages, fmt.Sprintf("%s", b.container.Authority.Block))
-	fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(b.container.Authority.Block)))
-	fmt.Printf("[DEBUG] PartialSig[Authority] (R hex): %x\n", authR)
+	// fmt.Printf("[DEBUG] Msg[Authority] SHA256: %s\n", sha256Hex([]byte(b.container.Authority.Block)))
+	// fmt.Printf("[DEBUG] PartialSig[Authority] (R hex): %x\n", authR)
 
 	// 2) Extrai R de todos os blocos (0..N-2)
 	for i := 0; i < N-1; i++ {
@@ -402,21 +402,21 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 			return nil, fmt.Errorf("[DEBUG] missing SignedBlock at index %d", i)
 		}
 
-		var pt Kyber.Point
+		var pt kyber.Point
 		if p, err := schoco.ByteToPoint(sb.Signature); err == nil {
 			pt = p
-			fmt.Printf("[DEBUG] Block %d signature: extracted R point directly\n", i)
+			// fmt.Printf("[DEBUG] Block %d signature: extracted R point directly\n", i)
 		} else if s, err2 := schoco.ByteToSignature(sb.Signature); err2 == nil {
 			pt = s.R
-			fmt.Printf("[DEBUG] Block %d signature: extracted R from full Signature\n", i)
+			// fmt.Printf("[DEBUG] Block %d signature: extracted R from full Signature\n", i)
 		} else {
 			return nil, fmt.Errorf("[DEBUG] Cannot parse block %d signature: %v / %v", i, err, err2)
 		}
 
 		setPartSig = append(setPartSig, pt)
 		setMessages = append(setMessages, fmt.Sprintf("%s", sb.Block))
-		fmt.Printf("[DEBUG] Msg[%d] SHA256: %s\n", i, sha256Hex([]byte(sb.Block)))
-		fmt.Printf("[DEBUG] PartialSig[%d] (R hex): %x\n", i, pt)
+		// fmt.Printf("[DEBUG] Msg[%d] SHA256: %s\n", i, sha256Hex([]byte(sb.Block)))
+		// fmt.Printf("[DEBUG] PartialSig[%d] (R hex): %x\n", i, pt)
 	}
 
 	// 3) Último bloco -> assinatura completa
@@ -429,8 +429,8 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 		return nil, fmt.Errorf("[DEBUG] cannot parse last block signature: %v", err)
 	}
 	setMessages = append(setMessages, fmt.Sprintf("%s", lastSB.Block))
-	fmt.Printf("[DEBUG] Msg[last] SHA256: %s\n", sha256Hex([]byte(lastSB.Block)))
-	fmt.Printf("[DEBUG] LastSig: (r=%x, s=%x)\n", lastSig.R, lastSig.S)
+	// fmt.Printf("[DEBUG] Msg[last] SHA256: %s\n", sha256Hex([]byte(lastSB.Block)))
+	// fmt.Printf("[DEBUG] LastSig: (r=%x, s=%x)\n", lastSig.R, lastSig.S)
 
 	// -----------------------
 	// Inverte arrays para ordem esperada pelo Verify
@@ -450,7 +450,7 @@ func (b *Biscuit) authorizerFor(rootPubKey Kyber.Point, opts ...AuthorizerOption
 		return nil, errors.New("invalid signature (extended)")
 	}
 
-	fmt.Println("[DEBUG] Extended signature verified")
+	// fmt.Println("[DEBUG] Extended signature verified")
 	return NewVerifier(b, opts...)
 }
 
@@ -487,7 +487,7 @@ func (b *Biscuit) AuthorizerFor(keySource PublickKeyByIDProjection, opts ...Auth
 
 // Authorizer checks the signature and creates an [Authorizer]. The Authorizer can then test the
 // authorizaion policies and accept or refuse the request.
-func (b *Biscuit) Authorizer(root Kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
+func (b *Biscuit) Authorizer(root kyber.Point, opts ...AuthorizerOption) (Authorizer, error) {
 	return b.authorizerFor(root)
 }
 
@@ -715,8 +715,8 @@ func reverseStrings(s []string) []string {
     }
     return r
 }
-func reversePoints(p []Kyber.Point) []Kyber.Point {
-    r := make([]Kyber.Point, len(p))
+func reversePoints(p []kyber.Point) []kyber.Point {
+    r := make([]kyber.Point, len(p))
     for i := range p {
         r[i] = p[len(p)-1-i]
     }

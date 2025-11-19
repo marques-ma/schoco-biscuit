@@ -116,3 +116,82 @@ func TestBiscuitThreeBlocks(t *testing.T) {
 	require.Error(t, authC.Authorize())
 	t.Log("[DEBUG] /b/file2 read denied (expected)")
 }
+
+func TestBiscuitSeal(t *testing.T) {
+	rng := rand.Reader
+	privateRoot, publicRoot := schoco.KeyPair()
+
+	// --- Cria builder ---
+	builder := NewBuilder(privateRoot, WithRNG(rng))
+	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}}})
+
+	// --- Cria Biscuit ---
+	b, err := builder.Build()
+	require.NoError(t, err)
+	require.False(t, b.sealed, "Biscuit original não deve estar sealed")
+
+	// --- Cria um bloco extra ---
+	block := b.CreateBlock()
+	block.AddCheck(Check{
+		Queries: []Rule{
+			{
+				Head: Predicate{Name: "can_read", IDs: []Term{Variable("res")}},
+				Body: []Predicate{
+					{Name: "right", IDs: []Term{Variable("res"), String("read")}},
+				},
+			},
+		},
+	})
+	b2, err := b.Append(rng, block.Build())
+	require.NoError(t, err)
+
+	// --- Seal do Biscuit ---
+	sealedB := b2.Seal()
+	require.True(t, sealedB.sealed, "Biscuit selado deve ter sealed = true")
+	require.False(t, b2.sealed, "Biscuit original não deve ser alterado")
+
+	// --- Teste de autorização com sealed Biscuit ---
+	auth, err := sealedB.AuthorizerFor(WithSingularRootPublicKey(publicRoot))
+	require.NoError(t, err)
+	auth.AddFact(Fact{Predicate: Predicate{Name: "res", IDs: []Term{String("/a/file1")}}})
+	auth.AddPolicy(DefaultAllowPolicy)
+	require.NoError(t, auth.Authorize(), "Biscuit selado deve autorizar corretamente")
+}
+
+func TestBiscuitSealAndAppend(t *testing.T) {
+	rng := rand.Reader
+
+	// --- Cria chave root ---
+	privateRoot, _ := schoco.KeyPair()
+
+	// --- Builder e authority facts ---
+	builder := NewBuilder(privateRoot)
+	builder.AddAuthorityFact(Fact{Predicate: Predicate{Name: "right", IDs: []Term{String("/a/file1"), String("read")}}})
+
+	// --- Cria o Biscuit ---
+	b, err := builder.Build()
+	require.NoError(t, err)
+	t.Log("[DEBUG] Authority-only Biscuit built")
+
+	// --- Selar o Biscuit ---
+	sealed := b.Seal()
+	require.True(t, sealed.sealed)
+	t.Log("[DEBUG] Biscuit sealed")
+
+	// --- Tenta adicionar um bloco após selagem ---
+	newBlock := sealed.CreateBlock()
+	newBlock.AddCheck(Check{
+		Queries: []Rule{
+			{
+				Head: Predicate{Name: "test_check", IDs: []Term{Variable("res")}},
+				Body: []Predicate{
+					{Name: "resource", IDs: []Term{Variable("res")}},
+				},
+			},
+		},
+	})
+
+	_, err = sealed.Append(rng, newBlock.Build())
+	require.Error(t, err) // ✅ deve falhar
+	t.Log("[DEBUG] Append to sealed Biscuit correctly failed")
+}
